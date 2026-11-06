@@ -14,9 +14,9 @@ ALIAS="DeepSeek-V4-Flash-0731"
 PORT=8000
 CONTEXT_SIZE=32768
 THREADS=12          # physical cores only; SMT siblings thrash cache
-N_CPU_MOE=36        # expert layers pushed to RAM. See the tuning table in CLAUDE.md.
-UBATCH_SIZE=2048    # prefill streams the CPU experts over PCIe once per ubatch — big ubatch amortises it
-BATCH_SIZE=2048
+N_CPU_MOE=34        # expert layers pushed to RAM. See the tuning table in CLAUDE.md.
+UBATCH_SIZE=6144    # prefill streams the CPU experts over PCIe once per ubatch — big ubatch amortises it
+BATCH_SIZE=6144
 LOAD_MODE=mmap      # DO NOT set to `none`/--no-mmap on this box. It is 1.7x faster at prefill
                     # (pinned host memory → full PCIe rate) but pins ~78gb unreclaimable, leaving
                     # ~10gb, and the OOM killer took out the agent 4min in. See CLAUDE.md.

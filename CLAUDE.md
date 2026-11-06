@@ -63,7 +63,9 @@ Re-measured 2026-11-05, same flags, A/B back-to-back (2 runs each):
 | b10244 | 193-219 | 548 | 764-776 | 18-21 |
 | **b12140 (current)** | 208-224 | 575-578 | 780-794 | 21-22 |
 
-b12140 is a small win. Both sit below the August numbers — the box drifted, not llama.cpp.
+b12140 is a small win. The August 36/2048 row (310/715) was likely a lucky single run — every
+neighbouring August row sits at 210-236 / 579-696, in line with these. Treat this table as baseline.
+Driver changed 610.43.02 → 615.71.10 in between; no evidence it matters.
 
 ### Prefill is PCIe-bound, not CPU-bound
 llama.cpp's op-offload streams the RAM-resident expert weights to the GPU **once per ubatch** (measured

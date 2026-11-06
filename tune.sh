@@ -18,7 +18,7 @@ RESULTS="tune.results"
 
 # name|extra llama-server args
 VARIANTS=(
-  "baseline        |-ncmoe 36 -b 2048 -ub 2048"
+  "current         |-ncmoe 34 -b 6144 -ub 6144"
 )
 # ---------------------------------------------------------------------------
 

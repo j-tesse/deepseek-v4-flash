@@ -27,6 +27,8 @@ deepseek-v4-flash/
 ├── bench.sh            single-request prefill/decode + PCIe counters against :8000
 ├── bench-spec.sh       echo-a-file decode bench — the case speculative decoding should win
 ├── tune.sh             sweep server flags, restarting the container per variant → tune.results
+├── tune-summary.sh     tune.results → markdown table, repeated variants merged as min-max
+├── needle-test.sh      3 needles in a ~22k-token prompt — run after changing -ub
 └── build.number/history
 ```
 
@@ -49,52 +51,48 @@ dense layers + KV cache go on the GPU and the experts are split GPU/RAM with `--
 Fit: 81gb RAM + 32gb VRAM = 113gb usable > 104gb.
 - GPU: ~8gb dense + ~4gb KV + ~0.6gb overhead → ~19gb of experts
 - experts ≈ 96gb / 43 layers ≈ 2.23gb per layer → ~8 expert layers fit on GPU
-- `--n-cpu-moe 35` leaves ~78gb of experts in RAM vs ~85gb free. **Headroom is ~7gb — tight.**
+- `--n-cpu-moe 34` leaves ~76gb of experts in RAM vs ~85gb free. **Headroom is ~9gb — tight.**
+- VRAM at `-ncmoe 34 -ub 6144` via `start.sh`: 30.4gb of 32.6gb. `-ncmoe 33` fits only at `-ub` ≤4096.
 
-Measured 2026-08-04 at `N_CPU_MOE=36`, `-ub 2048`: **23-24 tok/s decode**, **310 / 715 / 808 tok/s
-prefill** at 0.6k / 4.6k / 18k-token prompts. For reference a DGX Spark managed 15.5-17.4 tok/s decode
-/ 148 tok/s prompt on a comparable quant. Expect a slower first request after each start — mmap pages
-the weights in from NVMe lazily (the server reports healthy in ~16s, long before the weights are
-resident).
-
-Re-measured 2026-11-05, same flags, A/B back-to-back (2 runs each):
-| llama.cpp | 0.6k | 4.6k | 18k | decode |
-|---|---|---|---|---|
-| b10244 | 193-219 | 548 | 764-776 | 18-21 |
-| **b12140 (current)** | 208-224 | 575-578 | 780-794 | 21-22 |
-
-b12140 is a small win. The August 36/2048 row (310/715) was likely a lucky single run — every
-neighbouring August row sits at 210-236 / 579-696, in line with these. Treat this table as baseline.
-Driver changed 610.43.02 → 615.71.10 in between; no evidence it matters.
+Measured 2026-11-05 at `-ncmoe 34 -ub 6144` (b12140): **21-23 tok/s decode**, **~225-250 / ~830 /
+~1160-1220 tok/s prefill** at 0.6k / 4.6k / 18k-token prompts. For reference a DGX Spark managed
+15.5-17.4 tok/s decode / 148 tok/s prompt on a comparable quant. Expect a slower first request after each
+start — mmap pages the weights in from NVMe lazily (the server reports healthy in ~16s, long before the
+weights are resident).
 
 ### Prefill is PCIe-bound, not CPU-bound
 llama.cpp's op-offload streams the RAM-resident expert weights to the GPU **once per ubatch** (measured
 7-16 GB/s sustained PCIe rx during prefill, ~26gb per 512-token ubatch). The cost is per-ubatch and
 fixed, so it amortises over ubatch size — this is the single biggest lever in the whole setup.
-Raising `N_CPU_MOE` by one buys the VRAM headroom that makes the big ubatch pay off.
+Free VRAM is split between expert layers (`-ncmoe`) and ubatch compute buffers (`-ub`); the buffers win.
 
-`./tune.sh` sweeps flags and `./bench.sh` measures; measured 2026-08-04, prefill tok/s by prompt size:
+`./tune.sh` sweeps, `./tune-summary.sh` tabulates. Full re-tune 2026-11-05 on b12140: stage 1 = 21-cell
+grid (`-ncmoe` 33-37 x `-ub` 1024-4096, 1 run), stage 2 = finalists x3 runs, interleaved. Means:
 | `-ncmoe` / `-ub` | 0.6k | 4.6k | 18k | decode | VRAM |
 |---|---|---|---|---|---|
-| 35 / 512 (old default) | 172 | 325 | 332 | 22 | 25.6gb |
-| 35 / 2048 | 236 | 592 | 759 | 22 | 26.1gb |
-| **36 / 2048 (current)** | **310** | **715** | **808** | **23-24** | **24.2gb** |
-| 36 / 3072 | 223 | 696 | 903 | 21 | — |
-| 36 / 4096 | 224 | 666 | 925 | 22 | — |
-| 34 / 2048 | 210 | 579 | 711 | 21 | — |
+| 36 / 512 | 169 | 311 | 328 | ~21 | 23.7gb |
+| 36 / 2048 (Aug pick) | ~215 | ~575 | ~785 | ~21 | 24.1gb |
+| 36 / 4096 | 216 | 673 | 976 | 20.9 | 24.5gb |
+| 33 / 4096 | 249 | 722 | 1035 | 21.7 | 31.0gb |
+| 34 / 4096 | 221 | 697 | 993 | 21.2 | 28.7gb |
+| **34 / 6144 (current)** | **224** | **830** | **1157** | **21.3** | **29.7gb** |
+| 36 / 6144 | 218 | 823 | 1107 | 20.7 | 25.4gb |
+| 36 / 8192 | 214 | 772 | 1188 | 20.1 | 26.4gb |
 
-**2.4x prefill at long context for free.** `-ub` above 2048 keeps helping at 16k+ but regresses at
-≤4k, so 2048 is the best all-round pick for agent traffic. Decode depends only on `-ncmoe` (bytes read
-from RAM per token), not on `-ub`; the ±1 tok/s spread between same-`-ncmoe` rows is run noise.
+**+45% prefill at 4.6k and 18k over 36/2048, decode unchanged.** Prefill scales with the number of
+ubatches a prompt needs, so bigger `-ub` keeps winning; 8192 starts losing at 4.6k. The August
+"regression above 2048 at ≤4k" did not reproduce. 0.6k prefill is flat ~210-250 everywhere (one ubatch).
+Decode spread across `-ncmoe` 33-36 is ~1 tok/s, about one stdev of run noise (theory: ~0.6 tok/s per
+layer). `--threads` 10 / 12 / 16: no difference, keep 12.
 
-Verified at `-ub 2048`: a 3-needle recall test over a 6.5k-token prompt (4 ubatches) returns all three
-needles, so the upstream `ubatch >= 32` KV-corruption report does not reproduce here.
+Verified at `-ub 6144`: `./needle-test.sh` (22.6k tokens = 4 ubatches) returns all three needles, so the
+upstream `ubatch >= 32` KV-corruption report does not reproduce here.
 
 ### `--no-mmap` is 1.7x faster and still must stay off — it OOM-killed the agent
 With mmap the CPU experts sit in pageable page cache, so every per-ubatch copy to the GPU goes through
 a bounce buffer (measured 7-16 GB/s on a link good for ~50). `--load-mode none` (= `--no-mmap`) puts
 them in **pinned host memory** instead — `make_cpu_buft_list()` prefers the CUDA host buffer type, and
-the loader warns about this at startup. Measured 2026-08-04 at `-ncmoe 36 -ub 2048`:
+the loader warns about this at startup. Measured 2026-08-04 at `-ncmoe 36 -ub 2048` (b10244; `mmap` row is the outlier run, see above):
 
 | load mode | 0.6k | 4.6k | 18k | decode | load time |
 |---|---|---|---|---|---|
@@ -122,6 +120,7 @@ thrashes and every miss pays an upload on top of the CPU read. Prefill moved ±3
 (2048 looked faster, 4096+ slower) — not worth halving decode for.
 
 ### Decode is near its ceiling — don't expect much
+Analysis from 2026-08-04 at `-ncmoe 36`.
 Decode reads ~1.9gb/token of expert weights from RAM (36 layers x 6 of 256 experts). At 23.5 tok/s
 that is ~44 GB/s effective against a 96 GB/s theoretical / ~60-70 GB/s practical dual-channel ceiling.
 RAM is already at its rated 6000 MT/s (2x48gb CMK96GX5M2B6000Z30), so there is no BIOS win. The only
@@ -159,12 +158,12 @@ anyway rather than the hub's blobs/snapshots symlink layout.
   containers would race for the port after a reboot.
 - `--threads 12`: physical cores only; SMT siblings thrash cache.
 - Health start period is generous — loading 104gb takes minutes.
-- `-b/-ub 2048`: see the prefill tuning table above. Not a default — the default `-ub 512` costs 2.4x
+- `-b/-ub 6144`, `-ncmoe 34`: see the prefill tuning table above. The default `-ub 512` costs 3.5x
   prefill at long context.
 - `start.sh` always recreates the container: the flags are baked in at create time, so reusing a
   stale one would silently ignore edits to the constants.
 - Upstream (PR #24162, merged 2026-06-29) had post-merge reports of KV corruption at `ubatch >= 32`
-  *with expert offloading*. Did not reproduce at `-ub 2048` (see needle test above).
+  *with expert offloading*. Did not reproduce at `-ub 6144` (`./needle-test.sh`).
 
 ## Agent config sync
 `start.sh` calls `~/scripts/update-agent-models.sh` (same as vllm.sh / colibri) to point pi + OpenClaw

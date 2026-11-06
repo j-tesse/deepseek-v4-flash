@@ -16,7 +16,7 @@ Serves an OpenAI-compatible API on **port 8000** as a drop-in replacement for th
 ## Architecture
 ```
 deepseek-v4-flash/
-├── llama.cpp/          upstream submodule, pinned to a release tag (b10244). Never edited.
+├── llama.cpp/          upstream submodule, pinned to a release tag (b12140). Never edited.
 ├── build.sh            builds upstream's .devops/cuda.Dockerfile (target: server) via build args
 ├── build-async.sh      start|status [--json]|wait|log|stop — build takes ~10-20min
 ├── update.sh           move submodule to a newer tag (ff-only, refuses dirty tree) + rebuild
@@ -41,6 +41,7 @@ Image tags per build: `deepseek-v4-flash:b<N>`, `:<upstream-describe>`, `:latest
 ## Model
 `unsloth/DeepSeek-V4-Flash-0731-GGUF`, quant **UD-IQ3_XXS** (104gb, 4 shards).
 284B total / 13B active MoE, 43 layers, 256 routed experts (6 active), 1M ctx max.
+`DeepSeek-V4.1-Flash-1017` exists but is 763B — smallest quant (UD-IQ1_S) is 233gb. Does not fit.
 
 **Routed experts are ~97.5% of the weights** (~277B of 284B); the dense part is only ~6.5B. So the
 dense layers + KV cache go on the GPU and the experts are split GPU/RAM with `--n-cpu-moe`.
@@ -55,6 +56,14 @@ prefill** at 0.6k / 4.6k / 18k-token prompts. For reference a DGX Spark managed 
 / 148 tok/s prompt on a comparable quant. Expect a slower first request after each start — mmap pages
 the weights in from NVMe lazily (the server reports healthy in ~16s, long before the weights are
 resident).
+
+Re-measured 2026-11-05, same flags, A/B back-to-back (2 runs each):
+| llama.cpp | 0.6k | 4.6k | 18k | decode |
+|---|---|---|---|---|
+| b10244 | 193-219 | 548 | 764-776 | 18-21 |
+| **b12140 (current)** | 208-224 | 575-578 | 780-794 | 21-22 |
+
+b12140 is a small win. Both sit below the August numbers — the box drifted, not llama.cpp.
 
 ### Prefill is PCIe-bound, not CPU-bound
 llama.cpp's op-offload streams the RAM-resident expert weights to the GPU **once per ubatch** (measured
@@ -98,6 +107,17 @@ containers survived. The mmap safety net is exactly what stops this. Do not re-e
 This is what a RAM upgrade would buy: at 128gb, `--load-mode none` fits with ~50gb spare and the 4x
 prefill is free. It is the single highest-value hardware change for this box — worth far more than
 anything left in the flags.
+
+### `--moe-cache-mib` (b12140+) is a loss — leave it off
+VRAM SLRU cache for hot experts of the RAM layers. Measured 2026-11-05 at `-ncmoe 36 -ub 2048`:
+| cache MiB | 0 | 2048 | 4096 | 6144 | 7168 |
+|---|---|---|---|---|---|
+| decode tok/s | 21-23 | 9-10 | 14-15 | 17-21 | 17-24 |
+| VRAM | 24.7gb | 26.6gb | 28.7gb | 30.8gb | 31.8gb |
+
+PCIe rx stays at 12-18 GB/s during decode: 6-of-256 routing has too little reuse, so the cache
+thrashes and every miss pays an upload on top of the CPU read. Prefill moved ±30% with no trend
+(2048 looked faster, 4096+ slower) — not worth halving decode for.
 
 ### Decode is near its ceiling — don't expect much
 Decode reads ~1.9gb/token of expert weights from RAM (36 layers x 6 of 256 experts). At 23.5 tok/s

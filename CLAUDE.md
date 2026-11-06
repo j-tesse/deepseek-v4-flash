@@ -6,9 +6,9 @@ Serves an OpenAI-compatible API on **port 8000** as a drop-in replacement for th
 ## Machine
 - headless machine running Ubuntu Server
 - 96gb system memory - not all of it is available (~91gb total, ~81gb available)
-- RTX 5090 with 32gb VRAM - **shared, not exclusive**: `vllm_gemma4-31b-nvfp4-mtp` normally owns
+- RTX 5090 with 32gb VRAM - **shared, not exclusive**: a `vllm_*` container (`~/scripts/vllm.sh`) normally owns
   all of it (`--gpu-memory-utilization 0.982`, `restart: unless-stopped`). One GPU LLM at a time.
-  `start.sh` stops vLLM, `stop.sh` restores it.
+  `start.sh` stops vLLM, `stop.sh` restarts the most recently stopped `vllm_*` (no-op if one runs).
 - docker and nvidia docker tools already installed
 - Ryzen 9 9900X (12C/24T), driver 610.43.02 / CUDA 13.3, GPU is Blackwell **sm_120**
 - Crucial T705 Gen5 NVMe, ~670gb free

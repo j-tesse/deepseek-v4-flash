@@ -18,9 +18,7 @@ RESULTS="tune.results"
 
 # name|extra llama-server args
 VARIANTS=(
-  "spec-off        |-ncmoe 36 -b 2048 -ub 2048"
-  "spec-ngram-mod  |-ncmoe 36 -b 2048 -ub 2048 --spec-type ngram-mod"
-  "spec-ngram-mapk |-ncmoe 36 -b 2048 -ub 2048 --spec-type ngram-map-k"
+  "baseline        |-ncmoe 36 -b 2048 -ub 2048"
 )
 # ---------------------------------------------------------------------------
 
@@ -28,9 +26,10 @@ C='\033[96m'; G='\033[92m'; R='\033[91m'; RS='\033[0m'
 say() { echo -e "${C}==>${RS} $*"; }
 
 cleanup() { docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; }
-trap cleanup EXIT
+vllm=$(docker ps -q --filter "name=vllm_")
+trap 'cleanup; [ -z "$vllm" ] || docker start $vllm >/dev/null' EXIT
 
-docker ps -q --filter "name=vllm_" | xargs -r docker stop >/dev/null
+[ -z "$vllm" ] || docker stop $vllm >/dev/null
 docker ps -q --filter "name=llama_ds_v4_flash" | xargs -r docker stop >/dev/null
 
 : >"$RESULTS"
@@ -70,7 +69,8 @@ for v in "${VARIANTS[@]}"; do
   vram=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)
   { echo "### $name ($args)  vram=${vram}MiB"
     ./bench.sh 2>&1 | grep -E "n=|avg sm"
-    echo -n "  echo-test: "; ./bench-spec.sh 2>&1 | head -1; } >>"$RESULTS"
+    echo -n "  echo-test: "; ./bench-spec.sh 2>&1 | head -1
+    docker stop -t 30 "$CONTAINER" >/dev/null; docker logs "$CONTAINER" 2>&1 | grep -E "MoE cache size|slots|hit rate" || true; } >>"$RESULTS"
   tail -n 8 "$RESULTS"
 done
 

@@ -6,7 +6,6 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 CONTAINER="llama_ds_v4_flash"
-VLLM_CONTAINER="vllm_gemma4-31b-nvfp4-mtp"
 
 C='\033[96m'; Y='\033[93m'; RS='\033[0m'
 say() { echo -e "${C}==>${RS} $*"; }
@@ -22,7 +21,13 @@ for a in "$@"; do
   [ "$a" = --no-restore ] && { say "leaving GPU free"; exit 0; }
 done
 
-if docker ps -aq -f name="^${VLLM_CONTAINER}$" | grep -q .; then
+running=$(docker ps --filter name=vllm_ --format '{{.Names}}')
+[ -z "$running" ] || { say "$running already running"; exit 0; }
+
+# the most recently stopped vllm_* — i.e. the one start.sh stopped
+VLLM_CONTAINER=$(docker ps -aq --filter name=vllm_ --filter status=exited \
+  | xargs -r docker inspect --format '{{.State.FinishedAt}} {{.Name}}' | sort -r | head -1 | cut -d/ -f2)
+if [ -n "$VLLM_CONTAINER" ]; then
   say "restarting $VLLM_CONTAINER"
   docker start "$VLLM_CONTAINER" >/dev/null
   say "waiting for vLLM to come up"

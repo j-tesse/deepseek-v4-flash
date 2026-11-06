@@ -79,6 +79,26 @@ from RAM per token), not on `-ub`; the ±1 tok/s spread between same-`-ncmoe` ro
 Verified at `-ub 2048`: a 3-needle recall test over a 6.5k-token prompt (4 ubatches) returns all three
 needles, so the upstream `ubatch >= 32` KV-corruption report does not reproduce here.
 
+### `--no-mmap` is 1.7x faster and still must stay off — it OOM-killed the agent
+With mmap the CPU experts sit in pageable page cache, so every per-ubatch copy to the GPU goes through
+a bounce buffer (measured 7-16 GB/s on a link good for ~50). `--load-mode none` (= `--no-mmap`) puts
+them in **pinned host memory** instead — `make_cpu_buft_list()` prefers the CUDA host buffer type, and
+the loader warns about this at startup. Measured 2026-08-04 at `-ncmoe 36 -ub 2048`:
+
+| load mode | 0.6k | 4.6k | 18k | decode | load time |
+|---|---|---|---|---|---|
+| `mmap` (current) | 310 | 715 | 808 | 23-24 | 16s |
+| `none` | 620 | 1292 | 1344 | 23 | 36s |
+
+**4x prefill over the original baseline — and unusable.** It pins ~78gb that the kernel cannot reclaim,
+dropping MemAvailable from ~88gb to ~10gb. Four minutes after load the OOM killer fired and took the
+`claude` agent process (`oom_score_adj:200` makes it the preferred victim); llama.cpp and the other
+containers survived. The mmap safety net is exactly what stops this. Do not re-enable it at 96gb.
+
+This is what a RAM upgrade would buy: at 128gb, `--load-mode none` fits with ~50gb spare and the 4x
+prefill is free. It is the single highest-value hardware change for this box — worth far more than
+anything left in the flags.
+
 ### Decode is near its ceiling — don't expect much
 Decode reads ~1.9gb/token of expert weights from RAM (36 layers x 6 of 256 experts). At 23.5 tok/s
 that is ~44 GB/s effective against a 96 GB/s theoretical / ~60-70 GB/s practical dual-channel ceiling.
@@ -86,11 +106,18 @@ RAM is already at its rated 6000 MT/s (2x48gb CMK96GX5M2B6000Z30), so there is n
 real lever left is reading fewer bytes: fall back to `UD-IQ2_M` (90.9gb, ~12% fewer bytes) via
 `QUANT`/`MODEL_FILE` in `download-model.sh` + `start.sh`, at a quality cost.
 
-**Speculative decoding is a loss here — do not enable it.** Measured 2026-08-04 on an echo-the-file
-prompt: `--spec-type` off 23 tok/s, `ngram-mod` 21, `ngram-map-k` 18. With experts in RAM, verifying K
-draft tokens routes to up to 6K distinct experts and so costs ~Kx the weight reads, which outweighs
-any acceptance gain. `draft-mtp` is unavailable regardless: the Unsloth GGUF ships no `nextn`/MTP
-tensors (no `deepseek4.nextn_layer_count` key).
+**Speculative decoding — including MTP — cannot help here. Do not spend time on it.** Decode is ~100%
+expert-weight streaming: 36 layers x 6/256 x 2.23gb ≈ 1.9gb/token, which at 44 GB/s is 42.7ms of the
+42.5ms/token budget (the GPU sits at sm=0% during decode). With 6-of-256 routing, adjacent tokens pick
+near-disjoint expert sets, so verifying K drafts touches `256*(1-(1-6/256)^K)` experts per layer —
+11.9 for K=2 vs 12 sequential, 23.1 for K=4 vs 24. **Batching saves 1-4% even at 100% acceptance**,
+so any draft miss is a net loss. Measured on an echo-the-file prompt: off 23 tok/s, `ngram-mod` 21,
+`ngram-map-k` 18.
+
+MTP is obtainable — `convert_hf_to_gguf.py --mtp` emits the MTP head as a small standalone draft GGUF
+(and `--dspark` a V4 DSpark draft), so it would not require reconverting 284B — but it changes nothing
+about the arithmetic above. This quant ships no `nextn` tensors (no `deepseek4.nextn_layer_count`)
+regardless. Speculation only pays once the experts are in VRAM, which 32gb cannot do.
 
 mmap stays enabled (the default) so RAM overflow degrades to NVMe paging instead of OOM. Do not add
 `--mlock` or `--no-mmap`.

@@ -18,9 +18,7 @@ RESULTS="tune.results"
 
 # name|extra llama-server args
 VARIANTS=(
-  "spec-off        |-ncmoe 36 -b 2048 -ub 2048"
-  "spec-ngram-mod  |-ncmoe 36 -b 2048 -ub 2048 --spec-type ngram-mod"
-  "spec-ngram-mapk |-ncmoe 36 -b 2048 -ub 2048 --spec-type ngram-map-k"
+  "nommap          |-ncmoe 36 -b 2048 -ub 2048 --no-mmap"
 )
 # ---------------------------------------------------------------------------
 
